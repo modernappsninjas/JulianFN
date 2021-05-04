@@ -1,0 +1,162 @@
+name: update_member_record
+on:
+  pull_request_target:
+    types: [opened]
+    paths:
+    - 'static/userdata/member_record.yml'
+
+jobs:
+  job_verify_identity:
+    name: verify_identity
+    runs-on: ubuntu-latest
+    outputs:
+      output1: ${{ steps.idverified.outputs.idverified }}
+    steps:
+      - name: review event details
+        run: |
+          env
+          cat /home/runner/work/_temp/_github_workflow/event.json
+      - name: install yq
+        run: |
+          sudo wget https://github.com/mikefarah/yq/releases/download/v4.6.0/yq_linux_amd64 -O /usr/bin/yq &&\
+          sudo chmod +x /usr/bin/yq
+      - name: curl member record file
+        run: |
+          echo "github event repository name: ${{ github.event.repository.name }}"
+          curl -H "Authorization: token ${{ secrets.NINJABOTGURU }}" \
+          "https://raw.githubusercontent.com/modernappsninjas/${{ github.event.repository.name }}/main/static/userdata/member_record.yml" \
+          -o /tmp/member_record.yml
+          cat /tmp/member_record.yml
+      - name: extract member login from existing member record
+        run: |
+          yq e '.memberGithubLogin' /tmp/member_record.yml > /tmp/member_record_login
+          echo member_record_login=$(cat /tmp/member_record_login) >> $GITHUB_ENV
+      - name: verify that github account that opened pull request is the same as member record file being updated
+        run: |
+          echo ${{ env.member_record_login }}
+          if [ "${{ env.member_record_login }}" = "${{ github.event.sender.login }}" ]
+          then
+            echo idverified=true >> $GITHUB_ENV
+            echo "the requesting member is correctly updating their own record"
+          else
+            echo idverified=false >> $GITHUB_ENV
+            echo "the requesting user account is not the owner of this record"
+          fi
+      - id: idverified
+        if: env.idverified == 'true'
+        run: echo "::set-output name=idverified::true"
+      - name: if not verified, post message to pr
+        if: env.idverified == 'false'
+        run: |
+          curl -X POST \
+          -H "Authorization: token ${{ secrets.NINJABOTGURU }}" \
+          -H "Accept: application/vnd.github.v3+json" \
+          -d '{"event": "COMMENT", "body": "@'${{ github.event.sender.login }}' You must be logged in to Github with the same username as the memberGithubLogin as the member record file you are attempting to update. Please login as the member if you would like to update the member record. This PR will now be closed."}' \
+          "https://api.github.com/repos/${{ env.org_repo }}/pulls/${{ github.event.number }}/reviews" \
+          -o /tmp/pr_comment_post_response.json
+          cat /tmp/pr_comment_post_response.json
+      - name: if not verified, close pr
+        if: env.ismember == 'false'
+        run: |
+          curl -X PATCH \
+          -H "Authorization: token ${{ secrets.NINJABOTGURU }}" \
+          -H "Accept: application/vnd.github.v3+json" \
+          -d '{"state": "closed"}' \
+          "https://api.github.com/repos/${{ env.org_repo }}/pulls/${{ github.event.number }}" \
+          -o /tmp/close_pr_response.json
+          cat /tmp/close_pr_response.json
+  job_update_member_record:
+    name: update_member_record_job
+    needs: job_verify_identity
+    runs-on: ubuntu-latest
+    if: needs.job_verify_identity.outputs.output1 == 'true'
+    steps:
+      - name: review event details
+        run: |
+          env
+          cat /home/runner/work/_temp/_github_workflow/event.json
+      - name: install yq
+        run: |
+          sudo wget https://github.com/mikefarah/yq/releases/download/v4.6.0/yq_linux_amd64 -O /usr/bin/yq &&\
+          sudo chmod +x /usr/bin/yq
+      - name: set org/repo as org_repo
+        run: |
+          echo $(echo org_repo="$GITHUB_REPOSITORY") >> $GITHUB_ENV
+          org_repo="$GITHUB_REPOSITORY"
+          echo $org_repo
+      - name: merge pull request
+        run: |
+          curl -X PUT \
+          -H "Authorization: token ${{ secrets.NINJABOTGURU }}" \
+          -H "Accept: application/vnd.github.v3+json" \
+          -d '{"commit_title": "Course Registration for ${{ github.event.sender.login }}"}'                                                        \
+          "https://api.github.com/repos/${{ env.org_repo }}/pulls/${{ github.event.number }}/merge" \
+          -o /tmp/merge_pr_response.json
+          cat /tmp/merge_pr_response.json
+      - name: curl the member record file
+        run: |
+          curl -H "Authorization: token ${{ secrets.NINJABOTGURU }}" \
+          "https://raw.githubusercontent.com/modernappsninjas/${{ github.event.sender.login }}/main/static/userdata/member_record.yml" \
+          -o /tmp/merged_member_record.yml
+      - name: update member record metafields to ensure these fields are valided by github login and not modified by member
+        run: |
+          sed -i '/^memberGithubId/c\memberGithubId: "'${{ github.event.sender.id }}'"' /tmp/merged_member_record.yml
+          sed -i '/^memberGithubLogin/c\memberGithubLogin: "'${{ github.event.sender.login }}'"' /tmp/merged_member_record.yml
+      - name: gather member repository member record file sha
+        run: |
+          curl \
+          -H "Authorization: token ${{ secrets.NINJABOTGURU }}" \
+          -H "Accept: application/vnd.github.v3+json" \
+          "https://api.github.com/repos/modernappsninjas/${{ github.event.sender.login }}/contents/userdata/member_record.yml" \
+          -o /tmp/merge_sha.tmp
+          cat /tmp/merge_sha.tmp
+          cat /tmp/merge_sha.tmp | jq -r '.sha' > /tmp/merge_sha
+          echo $(echo member_record_sha=$(cat /tmp/merge_sha)) >> GITHUB_ENV
+      - name: push updated member record to member repository
+        run: |
+          curl -X PUT \
+          -H "Authorization: token ${{ secrets.NINJABOTGURU }}" \
+          -H "Accept: application/vnd.github.v3+json" \
+          -d '{"message": "Updating Member Record File For '${{ github.event.sender.login }}'", "content": "'$(cat /tmp/merged_member_record.yml | base64 -w 0)'","sha":"'$(cat /tmp/merge_sha)'"}' \
+          "https://api.github.com/repos/modernappsninjas/${{ github.event.sender.login }}/contents/userdata/member_record.yml" \
+          -o /tmp/member_repo_post_response.json
+          cat /tmp/member_repo_post_response.json
+      - name: gather admin-private member record file sha
+        run: |
+          curl \
+          -H "Authorization: token ${{ secrets.NINJABOTGURU }}" \
+          -H "Accept: application/vnd.github.v3+json" \
+          "https://api.github.com/repos/modernappsninja/admin-private/contents/userdata/members/${{ github.event.sender.login }}_${{ github.event.sender.id }}.yml" \
+          -o /tmp/member_record_sha.json.tmp
+          cat /tmp/member_record_sha.json.tmp
+          member_record_sha=$(cat /tmp/member_record_sha.json.tmp | jq -r '.sha')
+          cat /tmp/member_record_sha.json.tmp | jq -r '.sha' > /tmp/member_record_sha
+          echo "member record sha is: $member_record_sha"
+          echo $(echo member_record_sha=$(echo $member_record_sha)) >> GITHUB_ENV
+      - name: push updated member record to admin-private/registrations
+        run: |
+          curl -X PUT \
+          -H "Authorization: token ${{ secrets.NINJABOTGURU }}" \
+          -H "Accept: application/vnd.github.v3+json" \
+          -d '{"message": "Updating Member Record File For '${{ github.event.sender.login }}'", "content": "'$(cat /tmp/merged_member_record.yml | base64 -w 0)'", "sha":"'$(cat /tmp/member_record_sha)'"}' \
+          "https://api.github.com/repos/modernappsninja/admin-private/contents/userdata/members/${{ github.event.sender.login }}_${{ github.event.sender.id }}.yml" \
+          -o /tmp/admin-private_member_record_post_response.json
+          cat /tmp/admin-private_member_record_post_response.json
+      - name: post message to pr
+        run: |
+          curl -X POST \
+          -H "Authorization: token ${{ secrets.NINJABOTGURU }}" \
+          -H "Accept: application/vnd.github.v3+json" \
+          -d '{"event": "COMMENT", "body": "@'${{ github.event.sender.login }}' your member record file has been updated. You can see the updated file at [https://modernappsninjas.github.io/'${{ github.event.sender.login }}'/userdata/member_record.yml](https://modernappsninjas/'${{ github.event.sender.login }}'/userdata/member_record.yml). This PR will now be closed."}' \
+          "https://api.github.com/repos/${{ env.org_repo }}/pulls/${{ github.event.number }}/reviews" \
+          -o /tmp/pr_comment_post_response.json
+          cat /tmp/pr_comment_post_response.json
+      - name: close pr
+        run: |
+          curl -X PATCH \
+          -H "Authorization: token ${{ secrets.NINJABOTGURU }}" \
+          -H "Accept: application/vnd.github.v3+json" \
+          -d '{"state": "closed"}' \
+          "https://api.github.com/repos/${{ env.org_repo }}/pulls/${{ github.event.number }}" \
+          -o /tmp/close_pr_response.json
+          cat /tmp/close_pr_response.json
